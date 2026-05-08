@@ -177,8 +177,8 @@ export default function App() {
             </div>
             <div style={{ display:"flex", gap:10, marginBottom:16 }}>
               <button className="btn btn-ghost" style={{ flex:1 }} onClick={() => { navigator.clipboard?.writeText(inviteLink); setCopied(true); setTimeout(() => setCopied(false), 2000); }}>{copied ? "✓ Copié !" : "📋 Copier"}</button>
-              <button className="btn btn-ghost" style={{ flex:1 }} onClick={() => window.open(`https://wa.me/?text=${encodeURIComponent("Quelqu'un a quelque chose à te dire 🌒\n" + inviteLink)})}>💬 WhatsApp</button>
-              <button className="btn btn-ghost" style={{ flex:1 }} onClick={() => window.open(`sms:?body=${encodeURIComponent("Quelqu'un a quelque chose à te dire 🌒\n" + inviteLink)})}>📱 SMS</button>
+              <button className="btn btn-ghost" style={{ flex:1 }} onClick={() => { const msg = "Quelqu'un a quelque chose à te dire 🌒\n" + inviteLink; window.open("https://wa.me/?text=" + encodeURIComponent(msg)); }}>💬 WhatsApp</button>
+              <button className="btn btn-ghost" style={{ flex:1 }} onClick={() => { const msg = "Quelqu'un a quelque chose à te dire 🌒\n" + inviteLink; window.open("sms:?body=" + encodeURIComponent(msg)); }}>📱 SMS</button>
             </div>
             <div style={{ fontSize:12, color:"rgba(240,234,248,.28)", marginBottom:28, fontStyle:"italic" }}>
               Code : <span style={{ fontFamily:"monospace", color:"rgba(192,132,252,.7)", letterSpacing:".12em" }}>{sessionId}</span>
