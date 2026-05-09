@@ -15,6 +15,8 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getDatabase(firebaseApp);
 
+const INACTIVITY_MS = 48 * 60 * 60 * 1000; // 48 heures
+
 function genId() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
@@ -26,13 +28,31 @@ function timeAgo(ts) {
   return Math.floor(d / 3600) + "h";
 }
 
+function saveSession(sessionId, side, myName) {
+  localStorage.setItem("rs_session", JSON.stringify({ sessionId, side, myName, savedAt: Date.now() }));
+}
+
+function loadSession() {
+  try {
+    const raw = localStorage.getItem("rs_session");
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function clearSession() {
+  localStorage.removeItem("rs_session");
+}
+
 function shareWhatsApp(link) {
-  const msg = "Quelqu'un a quelque chose a te dire\n" + link;
+  const msg = "Quelqu un a quelque chose a te dire\n" + link;
   window.open("https://wa.me/?text=" + encodeURIComponent(msg));
 }
 
 function shareSMS(link) {
-  const msg = "Quelqu'un a quelque chose a te dire\n" + link;
+  const msg = "Quelqu un a quelque chose a te dire\n" + link;
   window.open("sms:?body=" + encodeURIComponent(msg));
 }
 
@@ -66,12 +86,14 @@ const STYLES = `
   .btn-primary:disabled { opacity:.35; cursor:default; transform:none; }
   .btn-ghost { background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.1); color:rgba(240,234,248,.65); }
   .btn-ghost:hover { background:rgba(255,255,255,.09); color:#f0eaf8; }
+  .btn-danger { background:rgba(239,68,68,.1); border:1px solid rgba(239,68,68,.25); color:rgba(239,68,68,.8); }
+  .btn-danger:hover { background:rgba(239,68,68,.2); color:#ef4444; }
   ::-webkit-scrollbar { width:3px; }
   ::-webkit-scrollbar-thumb { background:rgba(124,58,237,.4); border-radius:2px; }
 `;
 
 export default function App() {
-  const [screen, setScreen]       = useState("home");
+  const [screen, setScreen]       = useState("loading");
   const [myName, setMyName]       = useState("");
   const [sessionId, setSessionId] = useState(null);
   const [side, setSide]           = useState(null);
@@ -79,26 +101,87 @@ export default function App() {
   const [input, setInput]         = useState("");
   const [joinCode, setJoinCode]   = useState("");
   const [copied, setCopied]       = useState(false);
+  const [expired, setExpired]     = useState(false);
+
   const bottomRef = useRef(null);
   const inputRef  = useRef(null);
 
+  // Au chargement : restaurer session depuis localStorage
+  useEffect(function() {
+    const saved = loadSession();
+    if (saved && saved.sessionId) {
+      // Verifier si la session existe encore dans Firebase
+      get(ref(db, "sessions/" + saved.sessionId)).then(function(snap) {
+        if (snap.exists()) {
+          const s = snap.val();
+          const lastMsg = s.messages ? Object.values(s.messages).sort(function(a,b){return b.ts-a.ts;})[0] : null;
+          const lastActivity = lastMsg ? lastMsg.ts : s.createdAt;
+          if (Date.now() - lastActivity > INACTIVITY_MS) {
+            // Session expiree
+            clearSession();
+            setScreen("home");
+          } else {
+            // Restaurer
+            setSessionId(saved.sessionId);
+            setSide(saved.side);
+            setMyName(saved.myName);
+            setScreen("chat");
+          }
+        } else {
+          clearSession();
+          setScreen("home");
+        }
+      }).catch(function() {
+        clearSession();
+        setScreen("home");
+      });
+    } else {
+      // Verifier URL pour join
+      const m = window.location.hash.match(/join=([A-Z0-9]+)/);
+      if (m) { setJoinCode(m[1]); setScreen("joinName"); }
+      else setScreen("home");
+    }
+  }, []);
+
+  // Sync session Firebase en temps reel
   useEffect(function() {
     if (!sessionId) return;
     const dbRef = ref(db, "sessions/" + sessionId);
     const unsub = onValue(dbRef, function(snap) {
-      if (snap.exists()) setSession(snap.val());
+      if (snap.exists()) {
+        const s = snap.val();
+        // Verifier inactivite
+        const lastMsg = s.messages ? Object.values(s.messages).sort(function(a,b){return b.ts-a.ts;})[0] : null;
+        const lastActivity = lastMsg ? lastMsg.ts : s.createdAt;
+        if (Date.now() - lastActivity > INACTIVITY_MS) {
+          setExpired(true);
+          clearSession();
+        } else {
+          setExpired(false);
+        }
+        setSession(s);
+      }
     });
     return function() { unsub(); };
   }, [sessionId]);
 
+  // Verifier expiration toutes les minutes
   useEffect(function() {
-    if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: "smooth" });
+    if (!session) return;
+    const t = setInterval(function() {
+      const lastMsg = session.messages ? Object.values(session.messages).sort(function(a,b){return b.ts-a.ts;})[0] : null;
+      const lastActivity = lastMsg ? lastMsg.ts : session.createdAt;
+      if (Date.now() - lastActivity > INACTIVITY_MS) {
+        setExpired(true);
+        clearSession();
+      }
+    }, 60000);
+    return function() { clearInterval(t); };
   }, [session]);
 
   useEffect(function() {
-    const m = window.location.hash.match(/join=([A-Z0-9]+)/);
-    if (m) { setJoinCode(m[1]); setScreen("joinName"); }
-  }, []);
+    if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: "smooth" });
+  }, [session]);
 
   async function createSession() {
     if (!myName.trim()) return;
@@ -109,6 +192,7 @@ export default function App() {
       receiverName: null,
       messages: {},
       createdAt: Date.now(),
+      lastActivity: Date.now(),
       senderRequestedReveal: false,
       receiverRequestedReveal: false,
       bothRevealed: false,
@@ -116,6 +200,7 @@ export default function App() {
     });
     setSessionId(id);
     setSide("sender");
+    saveSession(id, "sender", myName);
     setScreen("invite");
   }
 
@@ -124,9 +209,17 @@ export default function App() {
     if (!myName.trim() || !id) return;
     const snap = await get(ref(db, "sessions/" + id));
     if (!snap.exists()) { alert("Session introuvable."); return; }
-    await update(ref(db, "sessions/" + id), { receiverName: myName, bothJoined: true });
+    const s = snap.val();
+    const lastMsg = s.messages ? Object.values(s.messages).sort(function(a,b){return b.ts-a.ts;})[0] : null;
+    const lastActivity = lastMsg ? lastMsg.ts : s.createdAt;
+    if (Date.now() - lastActivity > INACTIVITY_MS) {
+      alert("Cette session a expire. Demande un nouveau lien.");
+      return;
+    }
+    await update(ref(db, "sessions/" + id), { receiverName: myName, bothJoined: true, lastActivity: Date.now() });
     setSessionId(id);
     setSide("receiver");
+    saveSession(id, "receiver", myName);
     setScreen("chat");
   }
 
@@ -134,6 +227,7 @@ export default function App() {
     const text = input.trim();
     if (!text || !sessionId) return;
     await push(ref(db, "sessions/" + sessionId + "/messages"), { text: text, side: side, ts: Date.now() });
+    await update(ref(db, "sessions/" + sessionId), { lastActivity: Date.now() });
     setInput("");
     setTimeout(function() { if (inputRef.current) inputRef.current.focus(); }, 30);
   }
@@ -150,6 +244,20 @@ export default function App() {
     await update(ref(db, "sessions/" + sessionId), updates);
   }
 
+  function quitSession() {
+    if (window.confirm("Quitter cette session ? Tu ne pourras plus y revenir.")) {
+      clearSession();
+      setSessionId(null);
+      setSide(null);
+      setSession(null);
+      setMyName("");
+      setInput("");
+      setExpired(false);
+      window.location.hash = "";
+      setScreen("home");
+    }
+  }
+
   const msgs = session && session.messages
     ? Object.values(session.messages).sort(function(a, b) { return a.ts - b.ts; })
     : [];
@@ -159,6 +267,15 @@ export default function App() {
   const bothRevealed  = session ? session.bothRevealed : false;
   const theirName     = session ? (side === "sender" ? session.receiverName : session.senderName) : "";
   const inviteLink    = window.location.href.split("#")[0] + "#join=" + sessionId;
+
+  if (screen === "loading") {
+    return (
+      <div style={{ minHeight:"100vh", background:"#07060f", display:"flex", alignItems:"center", justifyContent:"center" }}>
+        <div className="pulse" style={{ fontSize:40 }}>🌒</div>
+        <style>{STYLES}</style>
+      </div>
+    );
+  }
 
   return (
     <div style={{ minHeight:"100vh", background:"#07060f", fontFamily:"'Inter',sans-serif", color:"#f0eaf8", display:"flex", alignItems:"center", justifyContent:"center", position:"relative", overflow:"hidden" }}>
@@ -171,6 +288,7 @@ export default function App() {
 
       <div style={{ position:"relative", zIndex:1, width:"100%", maxWidth:480 }}>
 
+        {/* HOME */}
         {screen === "home" && (
           <div className="fade" style={{ padding:"40px 24px", textAlign:"center" }}>
             <div className="hb" style={{ fontSize:54, marginBottom:20 }}>🌒</div>
@@ -205,6 +323,7 @@ export default function App() {
           </div>
         )}
 
+        {/* INVITE */}
         {screen === "invite" && (
           <div className="fade" style={{ padding:"40px 24px", textAlign:"center" }}>
             <div className="pulse" style={{ fontSize:46, marginBottom:20 }}>📨</div>
@@ -212,8 +331,8 @@ export default function App() {
               Ta session est prete
             </h2>
             <p style={{ fontSize:14, color:"rgba(240,234,248,.45)", lineHeight:1.8, marginBottom:32 }}>
-              Partage ce lien avec la personne a qui tu veux parler.<br />
-              Elle ne saura pas que c est toi.
+              Partage ce lien. Elle ne saura pas que c est toi.<br />
+              <span style={{ color:"rgba(251,191,36,.6)", fontSize:12 }}>La session expire apres 48h sans message.</span>
             </p>
             <div style={{ background:"rgba(124,58,237,.1)", border:"1px solid rgba(124,58,237,.22)", borderRadius:14, padding:"14px 18px", marginBottom:14, textAlign:"left" }}>
               <div style={{ fontSize:11, color:"rgba(240,234,248,.3)", marginBottom:6, letterSpacing:".06em" }}>LIEN DE SESSION</div>
@@ -239,6 +358,7 @@ export default function App() {
           </div>
         )}
 
+        {/* JOIN NAME */}
         {screen === "joinName" && (
           <div className="fade" style={{ padding:"40px 24px", textAlign:"center" }}>
             <div style={{ fontSize:46, marginBottom:20 }}>🦋</div>
@@ -269,10 +389,12 @@ export default function App() {
           </div>
         )}
 
+        {/* CHAT */}
         {screen === "chat" && session && (
           <div style={{ height:"100vh", display:"flex", flexDirection:"column" }}>
 
-            <div style={{ padding:"16px 20px", background:"rgba(7,6,15,.92)", backdropFilter:"blur(20px)", borderBottom:"1px solid rgba(255,255,255,.06)", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
+            {/* Header */}
+            <div style={{ padding:"14px 20px", background:"rgba(7,6,15,.92)", backdropFilter:"blur(20px)", borderBottom:"1px solid rgba(255,255,255,.06)", display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
               <div>
                 <div style={{ fontFamily:"'Playfair Display',serif", fontSize:17 }}>
                   🌒 <em style={{ color:"#c084fc" }}>Session privee</em>
@@ -281,53 +403,89 @@ export default function App() {
                   {session.bothJoined ? "Vous etes tous les deux presents" : "En attente de l autre personne..."}
                 </div>
               </div>
-              <div style={{ fontFamily:"monospace", fontSize:12, color:"rgba(124,58,237,.8)", background:"rgba(124,58,237,.1)", border:"1px solid rgba(124,58,237,.2)", padding:"4px 10px", borderRadius:8, letterSpacing:".1em" }}>
-                {sessionId}
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <div style={{ fontFamily:"monospace", fontSize:11, color:"rgba(124,58,237,.8)", background:"rgba(124,58,237,.1)", border:"1px solid rgba(124,58,237,.2)", padding:"3px 8px", borderRadius:6, letterSpacing:".1em" }}>
+                  {sessionId}
+                </div>
+                <button className="btn btn-danger" style={{ padding:"6px 12px", fontSize:11, borderRadius:20 }} onClick={quitSession}>
+                  Quitter
+                </button>
               </div>
             </div>
 
-            <div style={{ flex:1, overflowY:"auto", padding:"20px 16px" }}>
-              {!session.bothJoined && (
-                <div className="pulse" style={{ textAlign:"center", padding:"60px 20px", fontSize:14, color:"rgba(240,234,248,.3)", lineHeight:2 }}>
-                  🌑<br />En attente que la personne rejoigne...
-                </div>
-              )}
+            {/* Session expiree */}
+            {expired && (
+              <div style={{ padding:"24px", textAlign:"center", background:"rgba(239,68,68,.08)", borderBottom:"1px solid rgba(239,68,68,.2)" }}>
+                <div style={{ fontSize:28, marginBottom:8 }}>⌛</div>
+                <div style={{ fontFamily:"'Playfair Display',serif", fontSize:18, marginBottom:6, color:"rgba(239,68,68,.9)" }}>Session expiree</div>
+                <div style={{ fontSize:13, color:"rgba(240,234,248,.4)", marginBottom:16 }}>48h sans message — cette conversation est terminee.</div>
+                <button className="btn btn-primary" onClick={function() { clearSession(); setScreen("home"); setSession(null); setSessionId(null); }}>
+                  Nouvelle session
+                </button>
+              </div>
+            )}
 
-              {msgs.map(function(msg, i) {
-                const isMe = msg.side === side;
-                return (
-                  <div key={i} className="fade" style={{ display:"flex", justifyContent:isMe ? "flex-end" : "flex-start", marginBottom:14 }}>
-                    <div style={{ maxWidth:"76%" }}>
-                      <div style={{ padding:"11px 16px", background:isMe ? "linear-gradient(135deg,rgba(124,58,237,.32),rgba(219,39,119,.22))" : "rgba(255,255,255,.05)", border:"1px solid " + (isMe ? "rgba(124,58,237,.28)" : "rgba(255,255,255,.08)"), borderRadius:isMe ? "18px 4px 18px 18px" : "4px 18px 18px 18px", fontSize:15, lineHeight:1.65, color:"#f0eaf8" }}>
-                        {msg.text}
-                      </div>
-                      <div style={{ fontSize:10, color:"rgba(240,234,248,.22)", marginTop:4, textAlign:isMe ? "right" : "left" }}>
-                        {isMe ? "Toi" : "Anonyme"} · {timeAgo(msg.ts)}
+            {/* Messages */}
+            {!expired && (
+              <div style={{ flex:1, overflowY:"auto", padding:"20px 16px" }}>
+                {!session.bothJoined && (
+                  <div className="pulse" style={{ textAlign:"center", padding:"60px 20px", fontSize:14, color:"rgba(240,234,248,.3)", lineHeight:2 }}>
+                    🌑<br />En attente que la personne rejoigne...
+                  </div>
+                )}
+
+                {msgs.map(function(msg, i) {
+                  const isMe = msg.side === side;
+                  return (
+                    <div key={i} className="fade" style={{ display:"flex", justifyContent:isMe ? "flex-end" : "flex-start", marginBottom:14 }}>
+                      <div style={{ maxWidth:"76%" }}>
+                        <div style={{ padding:"11px 16px", background:isMe ? "linear-gradient(135deg,rgba(124,58,237,.32),rgba(219,39,119,.22))" : "rgba(255,255,255,.05)", border:"1px solid " + (isMe ? "rgba(124,58,237,.28)" : "rgba(255,255,255,.08)"), borderRadius:isMe ? "18px 4px 18px 18px" : "4px 18px 18px 18px", fontSize:15, lineHeight:1.65, color:"#f0eaf8" }}>
+                          {msg.text}
+                        </div>
+                        <div style={{ fontSize:10, color:"rgba(240,234,248,.22)", marginTop:4, textAlign:isMe ? "right" : "left" }}>
+                          {isMe ? "Toi" : "Anonyme"} · {timeAgo(msg.ts)}
+                        </div>
                       </div>
                     </div>
+                  );
+                })}
+
+                {theyRequested && !iRequested && !bothRevealed && (
+                  <div className="pulse" style={{ textAlign:"center", margin:"16px 0", fontSize:13, color:"#c084fc", fontStyle:"italic" }}>
+                    L autre personne souhaite se reveler a toi...
                   </div>
-                );
-              })}
+                )}
+                {iRequested && !bothRevealed && (
+                  <div style={{ textAlign:"center", margin:"16px 0", fontSize:13, color:"rgba(251,191,36,.8)", fontStyle:"italic" }}>
+                    Tu as demande la revelation - en attente de l autre...
+                  </div>
+                )}
 
-              {theyRequested && !iRequested && !bothRevealed && (
-                <div className="pulse" style={{ textAlign:"center", margin:"16px 0", fontSize:13, color:"#c084fc", fontStyle:"italic" }}>
-                  L autre personne souhaite se reveler a toi...
-                </div>
-              )}
-              {iRequested && !bothRevealed && (
-                <div style={{ textAlign:"center", margin:"16px 0", fontSize:13, color:"rgba(251,191,36,.8)", fontStyle:"italic" }}>
-                  Tu as demande la revelation - en attente de l autre...
-                </div>
-              )}
+                {bothRevealed && (
+                  <div className="reveal" style={{ margin:"20px 0", padding:"22px", background:"linear-gradient(135deg,rgba(124,58,237,.18),rgba(219,39,119,.14))", border:"1px solid rgba(124,58,237,.28)", borderRadius:16, textAlign:"center" }}>
+                    <div style={{ fontSize:30, marginBottom:8, animation:"heartbeat 2s infinite" }}>🌟</div>
+                    <div style={{ fontFamily:"'Playfair Display',serif", fontSize:19, marginBottom:6 }}>
+                      <em style={{ color:"#c084fc" }}>{side === "sender" ? myName : theirName}</em>
+                      {" & "}
+                      <em style={{ color:"#f472b6" }}>{side === "sender" ? theirName : myName}</em>
+                    </div>
+                    <div style={{ fontSize:13, color:"rgba(240,234,248,.45)", marginBottom:16 }}>Vous vous etes reveles</div>
+                    <div style={{ fontSize:12, color:"rgba(240,234,248,.3)" }}>
+                      La magie a opere. Continuez ailleurs.
+                    </div>
+                  </div>
+                )}
 
-              <div ref={bottomRef} />
-            </div>
+                <div ref={bottomRef} />
+              </div>
+            )}
 
-            {!bothRevealed && session.bothJoined && (
+            {/* Banniere revelation */}
+            {!bothRevealed && !expired && session.bothJoined && (
               <div style={{ padding:"12px 16px", background:"rgba(124,58,237,.07)", borderTop:"1px solid rgba(124,58,237,.12)", display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexShrink:0 }}>
                 <div style={{ fontSize:12, color:"rgba(240,234,248,.4)", lineHeight:1.6 }}>
                   Vous vous comprenez ?<br />
-                  <span style={{ color:"rgba(192,132,252,.6)" }}>Les deux doivent accepter pour se reveler.</span>
+                  <span style={{ color:"rgba(192,132,252,.6)" }}>Les deux doivent accepter.</span>
                 </div>
                 <button
                   onClick={requestReveal}
@@ -339,38 +497,29 @@ export default function App() {
               </div>
             )}
 
-            {bothRevealed && (
-              <div className="reveal" style={{ padding:"22px", background:"linear-gradient(135deg,rgba(124,58,237,.18),rgba(219,39,119,.14))", borderTop:"1px solid rgba(124,58,237,.28)", textAlign:"center", flexShrink:0 }}>
-                <div style={{ fontSize:30, marginBottom:8, animation:"heartbeat 2s infinite" }}>🌟</div>
-                <div style={{ fontFamily:"'Playfair Display',serif", fontSize:19, marginBottom:6 }}>
-                  <em style={{ color:"#c084fc" }}>{side === "sender" ? myName : theirName}</em>
-                  {" & "}
-                  <em style={{ color:"#f472b6" }}>{side === "sender" ? theirName : myName}</em>
-                </div>
-                <div style={{ fontSize:13, color:"rgba(240,234,248,.45)" }}>Vous vous etes reveles</div>
+            {/* Zone de saisie */}
+            {!expired && (
+              <div style={{ padding:"12px 16px 24px", background:"rgba(7,6,15,.95)", backdropFilter:"blur(20px)", borderTop:"1px solid rgba(255,255,255,.06)", display:"flex", gap:10, alignItems:"flex-end", flexShrink:0 }}>
+                <textarea
+                  ref={inputRef}
+                  rows={1}
+                  placeholder={session.bothJoined ? "Exprime-toi librement..." : "En attente de l autre personne..."}
+                  value={input}
+                  disabled={!session.bothJoined}
+                  onChange={function(e) { setInput(e.target.value); }}
+                  onKeyDown={function(e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
+                  onInput={function(e) { e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; }}
+                  style={{ flex:1, borderRadius:14, minHeight:48 }}
+                />
+                <button
+                  onClick={sendMessage}
+                  disabled={!input.trim() || !session.bothJoined}
+                  style={{ width:46, height:46, borderRadius:"50%", background:input.trim() && session.bothJoined ? "linear-gradient(135deg,#7c3aed,#db2777)" : "rgba(255,255,255,.05)", border:"none", color:input.trim() && session.bothJoined ? "#fff" : "rgba(255,255,255,.2)", fontSize:18, cursor:input.trim() && session.bothJoined ? "pointer" : "default", transition:"all .2s", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center" }}
+                >
+                  ↑
+                </button>
               </div>
             )}
-
-            <div style={{ padding:"12px 16px 24px", background:"rgba(7,6,15,.95)", backdropFilter:"blur(20px)", borderTop:"1px solid rgba(255,255,255,.06)", display:"flex", gap:10, alignItems:"flex-end", flexShrink:0 }}>
-              <textarea
-                ref={inputRef}
-                rows={1}
-                placeholder={session.bothJoined ? "Exprime-toi librement..." : "En attente de l autre personne..."}
-                value={input}
-                disabled={!session.bothJoined}
-                onChange={function(e) { setInput(e.target.value); }}
-                onKeyDown={function(e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-                onInput={function(e) { e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; }}
-                style={{ flex:1, borderRadius:14, minHeight:48 }}
-              />
-              <button
-                onClick={sendMessage}
-                disabled={!input.trim() || !session.bothJoined}
-                style={{ width:46, height:46, borderRadius:"50%", background:input.trim() && session.bothJoined ? "linear-gradient(135deg,#7c3aed,#db2777)" : "rgba(255,255,255,.05)", border:"none", color:input.trim() && session.bothJoined ? "#fff" : "rgba(255,255,255,.2)", fontSize:18, cursor:input.trim() && session.bothJoined ? "pointer" : "default", transition:"all .2s", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center" }}
-              >
-                ↑
-              </button>
-            </div>
 
           </div>
         )}
