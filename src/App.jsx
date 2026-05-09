@@ -652,9 +652,15 @@ export default function App() {
                 <div style={{ fontFamily:"monospace", fontSize:11, color:"rgba(124,58,237,.8)", background:"rgba(124,58,237,.1)", border:"1px solid rgba(124,58,237,.2)", padding:"3px 8px", borderRadius:6 }}>
                   {sessionId}
                 </div>
-                <button className="btn-danger" style={{ padding:"6px 12px", fontSize:11, borderRadius:20, border:"1px solid rgba(239,68,68,.25)" }} onClick={quitSession}>
-                  Quitter
-                </button>
+                {(profileId && side === "profile") ? (
+                  <button style={{ padding:"6px 12px", fontSize:11, borderRadius:20, border:"1px solid rgba(255,255,255,.1)", background:"rgba(255,255,255,.05)", color:"rgba(240,234,248,.7)", cursor:"pointer", fontFamily:"Inter,sans-serif", transition:"all .2s" }} onClick={function(){ setScreen("dashboard"); }}>
+                    ← Retour
+                  </button>
+                ) : (
+                  <button className="btn-danger" style={{ padding:"6px 12px", fontSize:11, borderRadius:20, border:"1px solid rgba(239,68,68,.25)" }} onClick={quitSession}>
+                    Quitter
+                  </button>
+                )}
               </div>
             </div>
 
