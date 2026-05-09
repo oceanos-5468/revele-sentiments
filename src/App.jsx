@@ -156,6 +156,32 @@ export default function App() {
     if (mB) { setScreen("visitorName"); saveLocal("rs_target_profile", mB[1]); return; }
 
     // Restaurer session Mode A
+    // Restaurer profil Mode B en priorite
+    const savedB = loadLocal("rs_profile");
+    if (savedB && savedB.profileId) {
+      setProfileId(savedB.profileId);
+      setMyName(savedB.myName);
+      // Verifier si une session de chat etait active
+      const savedA = loadLocal("rs_session");
+      if (savedA && savedA.sessionId && savedA.screen === "chat") {
+        get(ref(db, "sessions/" + savedA.sessionId)).then(function(snap) {
+          if (snap.exists()) {
+            setSessionId(savedA.sessionId);
+            setSide(savedA.side);
+            window.location.hash = "";
+            setScreen("chat");
+          } else {
+            clearLocal("rs_session");
+            setScreen("dashboard");
+          }
+        }).catch(function() { clearLocal("rs_session"); setScreen("dashboard"); });
+      } else {
+        setScreen("dashboard");
+      }
+      return;
+    }
+
+    // Restaurer session Mode A (sans profil)
     const savedA = loadLocal("rs_session");
     if (savedA && savedA.sessionId) {
       get(ref(db, "sessions/" + savedA.sessionId)).then(function(snap) {
@@ -163,21 +189,13 @@ export default function App() {
           setSessionId(savedA.sessionId);
           setSide(savedA.side);
           setMyName(savedA.myName);
+          window.location.hash = "";
           setScreen("chat");
         } else {
           clearLocal("rs_session");
           setScreen("home");
         }
       }).catch(function() { clearLocal("rs_session"); setScreen("home"); });
-      return;
-    }
-
-    // Restaurer profil Mode B
-    const savedB = loadLocal("rs_profile");
-    if (savedB && savedB.profileId) {
-      setProfileId(savedB.profileId);
-      setMyName(savedB.myName);
-      setScreen("dashboard");
       return;
     }
 
@@ -261,7 +279,7 @@ export default function App() {
     });
     setSessionId(id);
     setSide("sender");
-    saveLocal("rs_session", { sessionId: id, side: "sender", myName: myName });
+    saveLocal("rs_session", { sessionId: id, side: "sender", myName: myName, screen: "invite" });
     setScreen("invite");
   }
 
@@ -274,7 +292,7 @@ export default function App() {
     await update(ref(db, "sessions/" + id), { receiverName: myName, bothJoined: true, lastActivity: Date.now() });
     setSessionId(id);
     setSide("receiver");
-    saveLocal("rs_session", { sessionId: id, side: "receiver", myName: myName });
+    saveLocal("rs_session", { sessionId: id, side: "receiver", myName: myName, screen: "chat" });
     setScreen("chat");
   }
 
@@ -319,7 +337,7 @@ export default function App() {
     clearLocal("rs_target_profile");
     setSessionId(id);
     setSide("visitor");
-    saveLocal("rs_session", { sessionId: id, side: "visitor", myName: myName });
+    saveLocal("rs_session", { sessionId: id, side: "visitor", myName: myName, screen: "chat" });
     setScreen("chat");
   }
 
@@ -328,7 +346,7 @@ export default function App() {
     saveLocal("seen_" + convo.id, Date.now());
     setSessionId(convo.id);
     setSide("profile");
-    saveLocal("rs_session", { sessionId: convo.id, side: "profile", myName: myName });
+    saveLocal("rs_session", { sessionId: convo.id, side: "profile", myName: myName, screen: "chat" });
     setScreen("chat");
   }
 
